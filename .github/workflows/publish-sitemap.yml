@@ -1,4 +1,4 @@
-name: Publish Blog Sitemaps
+name: Publish Oaklin Lane Sitemaps
 
 on:
   workflow_dispatch:
@@ -21,7 +21,7 @@ jobs:
       - name: Get repository files
         uses: actions/checkout@v4
 
-      - name: Generate English and Spanish blog sitemaps
+      - name: Generate English and Spanish CMS sitemaps
         env:
           WEBFLOW_API_TOKEN: ${{ secrets.WEBFLOW_API_TOKEN }}
           WEBFLOW_SITE_ID: ${{ vars.WEBFLOW_SITE_ID }}
@@ -35,6 +35,17 @@ jobs:
           from urllib.request import Request, urlopen
           from urllib.parse import urlencode, quote
 
+          BASE_URL = "https://www.oaklinlane.com"
+          SITEMAP_NS = "http://www.sitemaps.org/schemas/sitemap/0.9"
+          ET.register_namespace("", SITEMAP_NS)
+
+          COLLECTIONS = [
+              ("Blog Posts", "posts", "blog"),
+              ("Locations", "locations", "locations"),
+              ("Blog Topics", "categories", "topic"),
+              ("Blog Authors", "authors", "blog-authors"),
+          ]
+
           def webflow(path):
               request = Request(
                   "https://api.webflow.com/v2" + path,
@@ -46,60 +57,65 @@ jobs:
               with urlopen(request, timeout=30) as response:
                   return json.load(response)
 
-          site_id = os.environ["WEBFLOW_SITE_ID"]
-
-          site = webflow(f"/sites/{site_id}")
-          locales = site["locales"]
-
-          spanish = next(
-              (
-                  loc for loc in locales["secondary"]
-                  if loc["tag"].lower().startswith("es")
-                  and loc.get("enabled", True)
-              ),
-              None
-          )
-
-          if not spanish:
-              raise SystemExit("Enabled Spanish locale not found")
-
-          collections = webflow(
-              f"/sites/{site_id}/collections"
-          )["collections"]
-
-          blog = next(
-              (
-                  c for c in collections
-                  if c["displayName"] == "Blog Posts"
-              ),
-              None
-          )
-
-          if not blog:
-              raise SystemExit("Blog Posts collection not found")
-
-          ns = "http://www.sitemaps.org/schemas/sitemap/0.9"
-          ET.register_namespace("", ns)
-
-          def generate(filename, cms_locale_id, prefix):
-              root = ET.Element(f"{{{ns}}}urlset")
-              urls = set()
+          def live_items(collection_id, cms_locale_id):
               offset = 0
-
               while True:
                   query = urlencode({
                       "limit": 100,
                       "offset": offset,
                       "cmsLocaleId": cms_locale_id
                   })
-
                   data = webflow(
-                      f"/collections/{blog['id']}/items/live?{query}"
+                      f"/collections/{collection_id}/items/live?{query}"
                   )
-
                   items = data["items"]
-
                   for item in items:
+                      yield item
+                  offset += len(items)
+                  if not items or offset >= data["pagination"]["total"]:
+                      break
+
+          site_id = os.environ["WEBFLOW_SITE_ID"]
+          locales = webflow(f"/sites/{site_id}")["locales"]
+          spanish = next(
+              (
+                  locale for locale in locales["secondary"]
+                  if locale["tag"].lower().startswith("es")
+                  and locale.get("enabled", True)
+              ),
+              None
+          )
+          if not spanish:
+              raise SystemExit("Enabled Spanish locale not found")
+
+          site_collections = webflow(
+              f"/sites/{site_id}/collections"
+          )["collections"]
+          collections_by_name = {
+              collection["displayName"]: collection["id"]
+              for collection in site_collections
+          }
+
+          locales_to_publish = [
+              ("", "", locales["primary"]["cmsLocaleId"]),
+              (
+                  "es-",
+                  spanish["subdirectory"].strip("/"),
+                  spanish["cmsLocaleId"]
+              ),
+          ]
+
+          for name, filename_stem, route in COLLECTIONS:
+              if name not in collections_by_name:
+                  raise SystemExit(f"CMS collection not found: {name}")
+
+              collection_id = collections_by_name[name]
+              for filename_prefix, url_prefix, cms_locale_id in locales_to_publish:
+                  filename = f"{filename_prefix}{filename_stem}-sitemap.xml"
+                  root = ET.Element(f"{{{SITEMAP_NS}}}urlset")
+                  seen = set()
+
+                  for item in live_items(collection_id, cms_locale_id):
                       if item.get("isDraft") or item.get("isArchived"):
                           continue
 
@@ -107,51 +123,29 @@ jobs:
                       if not slug:
                           continue
 
-                      url = (
-                          "https://www.oaklinlane.com/"
-                          + prefix
-                          + "blog/"
-                          + quote(slug, safe="-._~")
-                      )
+                      parts = [BASE_URL]
+                      if url_prefix:
+                          parts.append(url_prefix)
+                      parts.extend((route, quote(slug, safe="-._~")))
+                      url = "/".join(parts)
 
-                      if url in urls:
+                      if url in seen:
                           continue
 
-                      urls.add(url)
+                      seen.add(url)
+                      entry = ET.SubElement(root, f"{{{SITEMAP_NS}}}url")
+                      ET.SubElement(entry, f"{{{SITEMAP_NS}}}loc").text = url
 
-                      entry = ET.SubElement(root, f"{{{ns}}}url")
-                      ET.SubElement(entry, f"{{{ns}}}loc").text = url
+                  if not seen:
+                      raise SystemExit(f"No published URLs found for {filename}")
 
-                  offset += len(items)
-
-                  if not items or offset >= data["pagination"]["total"]:
-                      break
-
-              if not urls:
-                  raise SystemExit(f"No published URLs for {filename}")
-
-              ET.indent(root, space="  ")
-              ET.ElementTree(root).write(
-                  f"_site/{filename}",
-                  encoding="utf-8",
-                  xml_declaration=True
-              )
-
-              print(f"{filename}: {len(urls)} URLs")
-
-          generate(
-              "posts-sitemap.xml",
-              locales["primary"]["cmsLocaleId"],
-              ""
-          )
-
-          spanish_path = spanish["subdirectory"].strip("/") + "/"
-
-          generate(
-              "es-posts-sitemap.xml",
-              spanish["cmsLocaleId"],
-              spanish_path
-          )
+                  ET.indent(root, space="  ")
+                  ET.ElementTree(root).write(
+                      f"_site/{filename}",
+                      encoding="utf-8",
+                      xml_declaration=True
+                  )
+                  print(f"{filename}: {len(seen)} URLs")
           PY
 
       - name: Configure GitHub Pages
