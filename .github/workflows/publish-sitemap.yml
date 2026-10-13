@@ -43,7 +43,7 @@ jobs:
               ("Blog Posts", "posts", "blog"),
               ("Locations", "locations", "locations"),
               ("Blog Topics", "categories", "topic"),
-              ("Blog Authors", "authors", "blog-authors"),
+              ("Blog Authors", "authors", "author"),
           ]
 
           def webflow(path):
