@@ -21,7 +21,7 @@ jobs:
       - name: Get repository files
         uses: actions/checkout@v4
 
-      - name: Generate English and Spanish CMS sitemaps
+      - name: Generate English and Spanish sitemaps
         env:
           WEBFLOW_API_TOKEN: ${{ secrets.WEBFLOW_API_TOKEN }}
           WEBFLOW_SITE_ID: ${{ vars.WEBFLOW_SITE_ID }}
@@ -36,8 +36,8 @@ jobs:
           from urllib.parse import urlencode, quote
 
           BASE_URL = "https://www.oaklinlane.com"
-          SITEMAP_NS = "http://www.sitemaps.org/schemas/sitemap/0.9"
-          ET.register_namespace("", SITEMAP_NS)
+          NS = "http://www.sitemaps.org/schemas/sitemap/0.9"
+          ET.register_namespace("", NS)
 
           COLLECTIONS = [
               ("Blog Posts", "posts", "blog"),
@@ -46,34 +46,59 @@ jobs:
               ("Blog Authors", "authors", "author"),
           ]
 
+          SERVICES = {
+              "/sensory-integration",
+              "/physical-occupational-therapies",
+              "/speech-language-therapy",
+              "/feeding-swallowing-therapy",
+          }
+
+          EXCLUDED_PAGES = {
+              "/404",
+              "/401",
+              "/thank-you",
+              "/brand/business-cards",
+              "/resources-2",
+              "/academy-lane-registration",
+          }
+
           def webflow(path):
               request = Request(
                   "https://api.webflow.com/v2" + path,
                   headers={
                       "Authorization": "Bearer " + os.environ["WEBFLOW_API_TOKEN"],
-                      "Accept": "application/json"
-                  }
+                      "Accept": "application/json",
+                  },
               )
               with urlopen(request, timeout=30) as response:
                   return json.load(response)
 
-          def live_items(collection_id, cms_locale_id):
+          def get_all(path, key, extra=None):
               offset = 0
               while True:
-                  query = urlencode({
-                      "limit": 100,
-                      "offset": offset,
-                      "cmsLocaleId": cms_locale_id
-                  })
-                  data = webflow(
-                      f"/collections/{collection_id}/items/live?{query}"
-                  )
-                  items = data["items"]
-                  for item in items:
-                      yield item
+                  params = {"limit": 100, "offset": offset}
+                  if extra:
+                      params.update(extra)
+                  response = webflow(path + "?" + urlencode(params))
+                  items = response[key]
+                  yield from items
                   offset += len(items)
-                  if not items or offset >= data["pagination"]["total"]:
+                  if not items or offset >= response["pagination"]["total"]:
                       break
+
+          def write_sitemap(filename, urls):
+              root = ET.Element(f"{{{NS}}}urlset")
+              unique_urls = sorted(set(urls))
+              for url in unique_urls:
+                  entry = ET.SubElement(root, f"{{{NS}}}url")
+                  ET.SubElement(entry, f"{{{NS}}}loc").text = url
+              ET.indent(root, space="  ")
+              ET.ElementTree(root).write(
+                  f"_site/{filename}",
+                  encoding="utf-8",
+                  xml_declaration=True,
+              )
+              print(f"{filename}: {len(unique_urls)} URLs")
 
           site_id = os.environ["WEBFLOW_SITE_ID"]
           locales = webflow(f"/sites/{site_id}")["locales"]
@@ -83,69 +108,82 @@ jobs:
                   if locale["tag"].lower().startswith("es")
                   and locale.get("enabled", True)
               ),
-              None
+              None,
           )
           if not spanish:
               raise SystemExit("Enabled Spanish locale not found")
 
-          site_collections = webflow(
-              f"/sites/{site_id}/collections"
-          )["collections"]
-          collections_by_name = {
-              collection["displayName"]: collection["id"]
-              for collection in site_collections
-          }
-
-          locales_to_publish = [
-              ("", "", locales["primary"]["cmsLocaleId"]),
-              (
-                  "es-",
-                  spanish["subdirectory"].strip("/"),
-                  spanish["cmsLocaleId"]
-              ),
+          spanish_code = spanish["subdirectory"].strip("/")
+          language_configs = [
+              ("", "", locales["primary"]["cmsLocaleId"], None),
+              ("es-", spanish_code, spanish["cmsLocaleId"], spanish["id"]),
           ]
 
+          collection_list = webflow(f"/sites/{site_id}/collections")["collections"]
+          collection_ids = {c["displayName"]: c["id"] for c in collection_list}
+
+          # Generate CMS sitemaps
           for name, filename_stem, route in COLLECTIONS:
-              if name not in collections_by_name:
+              if name not in collection_ids:
                   raise SystemExit(f"CMS collection not found: {name}")
-
-              collection_id = collections_by_name[name]
-              for filename_prefix, url_prefix, cms_locale_id in locales_to_publish:
-                  filename = f"{filename_prefix}{filename_stem}-sitemap.xml"
-                  root = ET.Element(f"{{{SITEMAP_NS}}}urlset")
-                  seen = set()
-
-                  for item in live_items(collection_id, cms_locale_id):
+              collection_id = collection_ids[name]
+              for prefix, directory, cms_locale_id, _ in language_configs:
+                  urls = []
+                  for item in get_all(
+                      f"/collections/{collection_id}/items/live",
+                      "items",
+                      {"cmsLocaleId": cms_locale_id},
+                  ):
                       if item.get("isDraft") or item.get("isArchived"):
                           continue
-
                       slug = item.get("fieldData", {}).get("slug")
                       if not slug:
                           continue
+                      segments = ([directory] if directory else []) + [
+                          route, quote(slug, safe="-._~")
+                      ]
+                      urls.append(BASE_URL + "/" + "/".join(segments))
+                  if not urls:
+                      raise SystemExit(f"No published URLs found for {prefix}{filename_stem}")
+                  write_sitemap(f"{prefix}{filename_stem}-sitemap.xml", urls)
 
-                      parts = [BASE_URL]
-                      if url_prefix:
-                          parts.append(url_prefix)
-                      parts.extend((route, quote(slug, safe="-._~")))
-                      url = "/".join(parts)
+          # Generate Pages and Services sitemaps
+          for prefix, directory, _, page_locale_id in language_configs:
+              params = {"localeId": page_locale_id} if page_locale_id else None
+              pages_urls = []
+              services_urls = []
+              locale_prefix = "/" + directory if directory else ""
 
-                      if url in seen:
+              for page in get_all(f"/sites/{site_id}/pages", "pages", params):
+                  if page.get("draft") or page.get("archived"):
+                      continue
+                  if page.get("isBranch") or page.get("collectionId"):
+                      continue
+                  path = page.get("publishedPath")
+                  if not path or not path.startswith("/"):
+                      continue
+
+                  if directory:
+                      if path != locale_prefix and not path.startswith(locale_prefix + "/"):
                           continue
+                      base_path = path[len(locale_prefix):] or "/"
+                  else:
+                      base_path = path
 
-                      seen.add(url)
-                      entry = ET.SubElement(root, f"{{{SITEMAP_NS}}}url")
-                      ET.SubElement(entry, f"{{{SITEMAP_NS}}}loc").text = url
+                  base_path = base_path.rstrip("/") or "/"
+                  if base_path in EXCLUDED_PAGES:
+                      continue
 
-                  if not seen:
-                      raise SystemExit(f"No published URLs found for {filename}")
+                  url = BASE_URL + path
+                  if base_path in SERVICES:
+                      services_urls.append(url)
+                  else:
+                      pages_urls.append(url)
 
-                  ET.indent(root, space="  ")
-                  ET.ElementTree(root).write(
-                      f"_site/{filename}",
-                      encoding="utf-8",
-                      xml_declaration=True
-                  )
-                  print(f"{filename}: {len(seen)} URLs")
+              if not services_urls or not pages_urls:
+                  raise SystemExit(f"Missing Pages or Services for locale {prefix or 'en'}")
+              write_sitemap(f"{prefix}pages-sitemap.xml", pages_urls)
+              write_sitemap(f"{prefix}services-sitemap.xml", services_urls)
           PY
 
       - name: Configure GitHub Pages
