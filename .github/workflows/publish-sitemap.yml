@@ -1,4 +1,4 @@
-name: Publish Blog Sitemap
+name: Publish Blog Sitemaps
 
 on:
   workflow_dispatch:
@@ -21,7 +21,7 @@ jobs:
       - name: Get repository files
         uses: actions/checkout@v4
 
-      - name: Generate blog sitemap
+      - name: Generate English and Spanish blog sitemaps
         env:
           WEBFLOW_API_TOKEN: ${{ secrets.WEBFLOW_API_TOKEN }}
           WEBFLOW_SITE_ID: ${{ vars.WEBFLOW_SITE_ID }}
@@ -31,9 +31,9 @@ jobs:
           python3 - <<'PY'
           import os
           import json
+          import xml.etree.ElementTree as ET
           from urllib.request import Request, urlopen
-          from urllib.parse import quote
-          from xml.etree.ElementTree import Element, SubElement, ElementTree, indent
+          from urllib.parse import urlencode, quote
 
           def webflow(path):
               request = Request(
@@ -47,58 +47,111 @@ jobs:
                   return json.load(response)
 
           site_id = os.environ["WEBFLOW_SITE_ID"]
-          collections = webflow(f"/sites/{site_id}/collections")["collections"]
 
-          blog = next(
-              (c for c in collections if c["displayName"] == "Blog Posts"),
+          site = webflow(f"/sites/{site_id}")
+          locales = site["locales"]
+
+          spanish = next(
+              (
+                  loc for loc in locales["secondary"]
+                  if loc["tag"].lower().startswith("es")
+                  and loc.get("enabled", True)
+              ),
               None
           )
+
+          if not spanish:
+              raise SystemExit("Enabled Spanish locale not found")
+
+          collections = webflow(
+              f"/sites/{site_id}/collections"
+          )["collections"]
+
+          blog = next(
+              (
+                  c for c in collections
+                  if c["displayName"] == "Blog Posts"
+              ),
+              None
+          )
+
           if not blog:
               raise SystemExit("Blog Posts collection not found")
 
-          root = Element("urlset", {
-              "xmlns": "http://www.sitemaps.org/schemas/sitemap/0.9"
-          })
+          ns = "http://www.sitemaps.org/schemas/sitemap/0.9"
+          ET.register_namespace("", ns)
 
-          offset = 0
-          urls = set()
+          def generate(filename, cms_locale_id, prefix):
+              root = ET.Element(f"{{{ns}}}urlset")
+              urls = set()
+              offset = 0
 
-          while True:
-              data = webflow(
-                  f"/collections/{blog['id']}/items/live?limit=100&offset={offset}"
+              while True:
+                  query = urlencode({
+                      "limit": 100,
+                      "offset": offset,
+                      "cmsLocaleId": cms_locale_id
+                  })
+
+                  data = webflow(
+                      f"/collections/{blog['id']}/items/live?{query}"
+                  )
+
+                  items = data["items"]
+
+                  for item in items:
+                      if item.get("isDraft") or item.get("isArchived"):
+                          continue
+
+                      slug = item.get("fieldData", {}).get("slug")
+                      if not slug:
+                          continue
+
+                      url = (
+                          "https://www.oaklinlane.com/"
+                          + prefix
+                          + "blog/"
+                          + quote(slug, safe="-._~")
+                      )
+
+                      if url in urls:
+                          continue
+
+                      urls.add(url)
+
+                      entry = ET.SubElement(root, f"{{{ns}}}url")
+                      ET.SubElement(entry, f"{{{ns}}}loc").text = url
+
+                  offset += len(items)
+
+                  if not items or offset >= data["pagination"]["total"]:
+                      break
+
+              if not urls:
+                  raise SystemExit(f"No published URLs for {filename}")
+
+              ET.indent(root, space="  ")
+              ET.ElementTree(root).write(
+                  f"_site/{filename}",
+                  encoding="utf-8",
+                  xml_declaration=True
               )
-              items = data["items"]
 
-              for item in items:
-                  if item.get("isDraft") or item.get("isArchived"):
-                      continue
+              print(f"{filename}: {len(urls)} URLs")
 
-                  slug = item.get("fieldData", {}).get("slug")
-                  if not slug:
-                      continue
-
-                  url = "https://www.oaklinlane.com/blog/" + quote(slug, safe="-._~")
-                  if url in urls:
-                      continue
-
-                  urls.add(url)
-                  SubElement(SubElement(root, "url"), "loc").text = url
-
-              offset += len(items)
-              if not items or offset >= data["pagination"]["total"]:
-                  break
-
-          if not urls:
-              raise SystemExit("No published blog posts found")
-
-          indent(root, space="  ")
-          ElementTree(root).write(
-              "_site/posts-sitemap.xml",
-              encoding="utf-8",
-              xml_declaration=True
+          generate(
+              "posts-sitemap.xml",
+              locales["primary"]["cmsLocaleId"],
+              ""
           )
 
-          print(f"Successfully generated {len(urls)} blog URLs")
+          spanish_path = spanish["subdirectory"].strip("/") + "/"
+
+          generate(
+              "es-posts-sitemap.xml",
+              spanish["cmsLocaleId"],
+              spanish_path
+          )
           PY
 
       - name: Configure GitHub Pages
@@ -116,6 +169,6 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - name: Publish sitemap
+      - name: Publish sitemaps
         id: deployment
         uses: actions/deploy-pages@v4
