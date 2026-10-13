@@ -1,4 +1,3 @@
-
 name: Inspect Static Pages
 
 on:
@@ -17,17 +16,24 @@ jobs:
           import os
           import json
           from urllib.request import Request, urlopen
+          from urllib.error import HTTPError
           from urllib.parse import urlencode
 
           def webflow(path):
               request = Request(
                   "https://api.webflow.com/v2" + path,
                   headers={
-                      "Authorization": "Bearer " + os.environ["WEBFLOW_API_TOKEN"]
+                      "Authorization": "Bearer " + os.environ["WEBFLOW_API_TOKEN"],
+                      "Accept": "application/json"
                   }
               )
-              with urlopen(request, timeout=30) as response:
-                  return json.load(response)
+              try:
+                  with urlopen(request, timeout=30) as response:
+                      return json.load(response)
+              except HTTPError as error:
+                  details = error.read().decode("utf-8")
+                  print(f"Webflow API Error {error.code}: {details}", flush=True)
+                  raise SystemExit(1)
 
           site_id = os.environ["WEBFLOW_SITE_ID"]
           locales = webflow(f"/sites/{site_id}")["locales"]
@@ -46,12 +52,17 @@ jobs:
           ]:
               print(f"\n========== {name} ==========", flush=True)
               offset = 0
+
               while True:
-                  query = urlencode({
-                      "localeId": locale["id"],
+                  params = {
                       "limit": 100,
                       "offset": offset
-                  })
+                  }
+
+                  if name == "SPANISH":
+                      params["localeId"] = locale["id"]
+
+                  query = urlencode(params)
                   data = webflow(f"/sites/{site_id}/pages?{query}")
                   pages = data["pages"]
 
