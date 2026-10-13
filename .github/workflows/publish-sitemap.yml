@@ -1,0 +1,121 @@
+name: Publish Blog Sitemap
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 11 * * *'
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get repository files
+        uses: actions/checkout@v4
+
+      - name: Generate blog sitemap
+        env:
+          WEBFLOW_API_TOKEN: ${{ secrets.WEBFLOW_API_TOKEN }}
+          WEBFLOW_SITE_ID: ${{ vars.WEBFLOW_SITE_ID }}
+        run: |
+          mkdir -p _site
+          cp index.html _site/index.html
+          python3 - <<'PY'
+          import os
+          import json
+          from urllib.request import Request, urlopen
+          from urllib.parse import quote
+          from xml.etree.ElementTree import Element, SubElement, ElementTree, indent
+
+          def webflow(path):
+              request = Request(
+                  "https://api.webflow.com/v2" + path,
+                  headers={
+                      "Authorization": "Bearer " + os.environ["WEBFLOW_API_TOKEN"],
+                      "Accept": "application/json"
+                  }
+              )
+              with urlopen(request, timeout=30) as response:
+                  return json.load(response)
+
+          site_id = os.environ["WEBFLOW_SITE_ID"]
+          collections = webflow(f"/sites/{site_id}/collections")["collections"]
+
+          blog = next(
+              (c for c in collections if c["displayName"] == "Blog Posts"),
+              None
+          )
+          if not blog:
+              raise SystemExit("Blog Posts collection not found")
+
+          root = Element("urlset", {
+              "xmlns": "http://www.sitemaps.org/schemas/sitemap/0.9"
+          })
+
+          offset = 0
+          urls = set()
+
+          while True:
+              data = webflow(
+                  f"/collections/{blog['id']}/items/live?limit=100&offset={offset}"
+              )
+              items = data["items"]
+
+              for item in items:
+                  if item.get("isDraft") or item.get("isArchived"):
+                      continue
+
+                  slug = item.get("fieldData", {}).get("slug")
+                  if not slug:
+                      continue
+
+                  url = "https://www.oaklinlane.com/blog/" + quote(slug, safe="-._~")
+                  if url in urls:
+                      continue
+
+                  urls.add(url)
+                  SubElement(SubElement(root, "url"), "loc").text = url
+
+              offset += len(items)
+              if not items or offset >= data["pagination"]["total"]:
+                  break
+
+          if not urls:
+              raise SystemExit("No published blog posts found")
+
+          indent(root, space="  ")
+          ElementTree(root).write(
+              "_site/posts-sitemap.xml",
+              encoding="utf-8",
+              xml_declaration=True
+          )
+
+          print(f"Successfully generated {len(urls)} blog URLs")
+          PY
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload sitemap files
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: ./_site
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Publish sitemap
+        id: deployment
+        uses: actions/deploy-pages@v4
