@@ -1,0 +1,19 @@
+name: Test Webflow Connection
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch Webflow CMS collections
+        env:
+          WEBFLOW_API_TOKEN: ${{ secrets.WEBFLOW_API_TOKEN }}
+          WEBFLOW_SITE_ID: ${{ vars.WEBFLOW_SITE_ID }}
+        run: |
+          set -euo pipefail
+          curl --fail-with-body --silent --show-error \
+            "https://api.webflow.com/v2/sites/${WEBFLOW_SITE_ID}/collections" \
+            -H "Authorization: Bearer ${WEBFLOW_API_TOKEN}" \
+            | jq -r '.collections[].displayName'
