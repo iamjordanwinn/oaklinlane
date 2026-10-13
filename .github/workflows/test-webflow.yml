@@ -1,19 +1,70 @@
-name: Test Webflow Connection
+
+name: Inspect Static Pages
 
 on:
   workflow_dispatch:
 
 jobs:
-  test:
+  inspect:
     runs-on: ubuntu-latest
     steps:
-      - name: Fetch Webflow CMS collections
+      - name: List English and Spanish pages
         env:
           WEBFLOW_API_TOKEN: ${{ secrets.WEBFLOW_API_TOKEN }}
           WEBFLOW_SITE_ID: ${{ vars.WEBFLOW_SITE_ID }}
         run: |
-          set -euo pipefail
-          curl --fail-with-body --silent --show-error \
-            "https://api.webflow.com/v2/sites/${WEBFLOW_SITE_ID}/collections" \
-            -H "Authorization: Bearer ${WEBFLOW_API_TOKEN}" \
-            | jq -r '.collections[].displayName'
+          python3 - <<'PY'
+          import os
+          import json
+          from urllib.request import Request, urlopen
+          from urllib.parse import urlencode
+
+          def webflow(path):
+              request = Request(
+                  "https://api.webflow.com/v2" + path,
+                  headers={
+                      "Authorization": "Bearer " + os.environ["WEBFLOW_API_TOKEN"]
+                  }
+              )
+              with urlopen(request, timeout=30) as response:
+                  return json.load(response)
+
+          site_id = os.environ["WEBFLOW_SITE_ID"]
+          locales = webflow(f"/sites/{site_id}")["locales"]
+
+          spanish = next(
+              (loc for loc in locales["secondary"]
+               if loc["tag"].lower().startswith("es")),
+              None
+          )
+          if not spanish:
+              raise SystemExit("Spanish locale not found")
+
+          for name, locale in [
+              ("ENGLISH", locales["primary"]),
+              ("SPANISH", spanish)
+          ]:
+              print(f"\n========== {name} ==========", flush=True)
+              offset = 0
+              while True:
+                  query = urlencode({
+                      "localeId": locale["id"],
+                      "limit": 100,
+                      "offset": offset
+                  })
+                  data = webflow(f"/sites/{site_id}/pages?{query}")
+                  pages = data["pages"]
+
+                  for page in pages:
+                      if page.get("draft") or page.get("archived"):
+                          continue
+                      if page.get("isBranch") or page.get("collectionId"):
+                          continue
+                      path = page.get("publishedPath")
+                      if path:
+                          print(f"{page['title']} | {path}", flush=True)
+
+                  offset += len(pages)
+                  if not pages or offset >= data["pagination"]["total"]:
+                      break
+          PY
