@@ -139,6 +139,8 @@ jobs:
                       slug = item.get("fieldData", {}).get("slug")
                       if not slug:
                           continue
+                      if name == "Blog Topics" and slug == "all-posts":
+                          continue
                       segments = ([directory] if directory else []) + [
                           route, quote(slug, safe="-._~")
                       ]
