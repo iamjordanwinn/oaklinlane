@@ -1,0 +1,25 @@
+name: Keep Sitemap Automation Active
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '37 9 1 * *'
+
+permissions:
+  contents: write
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get repository files
+        uses: actions/checkout@v4
+
+      - name: Keep repository active
+        run: |
+          date -u +"%Y-%m-%dT%H:%M:%SZ" > .sitemap-keepalive
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .sitemap-keepalive
+          git commit -m "Keep sitemap automation active"
+          git push
